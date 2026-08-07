@@ -1,0 +1,7 @@
+{
+	acme_dns bunny {env.BUNNY_API_KEY}
+}
+
+example.invalid {
+	respond "ok"
+}
