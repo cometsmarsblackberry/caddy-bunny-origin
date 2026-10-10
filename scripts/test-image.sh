@@ -5,14 +5,13 @@ image_ref="${1:-caddy-bunny-origin:test}"
 script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 repo_dir=$(dirname "$script_dir")
 
+expected_version=$(sed -n 's/^ARG CADDY_VERSION=//p' "$repo_dir/Dockerfile")
 version=$(docker run --rm "$image_ref" caddy version)
-case "$version" in
-	v2.11.4*) ;;
-	*)
-		echo "Unexpected Caddy version: $version" >&2
-		exit 1
-		;;
-esac
+actual_version=${version%% *}
+if [ -z "$expected_version" ] || [ "$actual_version" != "v$expected_version" ]; then
+	echo "Unexpected Caddy version: $version (expected v$expected_version)" >&2
+	exit 1
+fi
 
 modules=$(docker run --rm "$image_ref" caddy list-modules)
 echo "$modules" | grep -Fx "http.ip_sources.bunny" >/dev/null
