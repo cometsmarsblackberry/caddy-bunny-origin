@@ -1,0 +1,45 @@
+name: Merge validated Dependabot updates
+
+on:
+  workflow_run:
+    workflows: [Build and publish image]
+    types: [completed]
+
+concurrency:
+  group: dependabot-auto-merge
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+jobs:
+  merge:
+    if: >-
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # Do not check out or execute PR code in this privileged workflow.
+      - name: Merge only the tested Dependabot commit and dispatch its release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          pulls=$(gh api "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/pulls" \
+            --jq '.[] | select(.state == "open" and .user.login == "dependabot[bot]") | .number')
+          for number in $pulls; do
+            pr=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$number")
+            if ! jq -e --arg sha "$HEAD_SHA" --arg repo "$GITHUB_REPOSITORY" '
+              .user.login == "dependabot[bot]" and .state == "open" and .draft == false and
+              .head.sha == $sha and .head.repo.full_name == $repo and
+              .base.repo.full_name == $repo and .base.ref == "main"
+            ' <<< "$pr" >/dev/null; then
+              continue
+            fi
+            gh pr merge "$number" --repo "$GITHUB_REPOSITORY" --squash --match-head-commit "$HEAD_SHA"
+            gh workflow run build.yml --repo "$GITHUB_REPOSITORY" --ref main
+          done

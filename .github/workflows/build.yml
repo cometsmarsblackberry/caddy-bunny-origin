@@ -13,8 +13,8 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || 'releases' }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -30,10 +30,13 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c  # v4.2.0
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Test dependency and release automation
+        run: python3 -m unittest discover -s tests -p 'test_*.py'
 
       - name: Build validation image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           load: true
@@ -47,12 +50,12 @@ jobs:
 
   publish:
     name: Publish image
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     needs: validate
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
-      contents: read
+      contents: write
       packages: write
       attestations: write
       id-token: write
@@ -60,11 +63,21 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Reserve or resume image release
+        id: release
+        run: python3 scripts/prepare_release.py
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c  # v4.2.0
+        if: steps.release.outputs.publish == 'true'
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Log in to GitHub Container Registry
+        if: steps.release.outputs.publish == 'true'
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
         with:
           registry: ghcr.io
@@ -72,23 +85,25 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Generate image metadata
+        if: steps.release.outputs.publish == 'true'
         id: metadata
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302  # v6.2.0
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
-            type=ref,event=branch
-            type=ref,event=tag
-            type=semver,pattern={{version}}
+            type=raw,value=${{ steps.release.outputs.tag }}
+            type=raw,value=${{ steps.release.outputs.version }}
             type=sha,format=long
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+          flavor: latest=false
           labels: |
             org.opencontainers.image.title=Caddy with Bunny origin support
             org.opencontainers.image.description=Caddy with pinned Bunny trusted-proxy and DNS modules
+            org.opencontainers.image.version=${{ steps.release.outputs.version }}
 
       - name: Build and publish image
+        if: steps.release.outputs.publish == 'true'
         id: build
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           platforms: linux/amd64,linux/arm64
@@ -102,8 +117,32 @@ jobs:
           sbom: true
 
       - name: Attest image provenance
+        if: steps.release.outputs.publish == 'true'
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6  # v4.2.2
         with:
           subject-name: ghcr.io/${{ github.repository }}
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
+
+      - name: Promote successful image to moving tags
+        if: steps.release.outputs.publish == 'true' && github.ref == 'refs/heads/main'
+        id: promote
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          current_main=$(git ls-remote origin refs/heads/main | cut -f1)
+          if [ "$(git rev-parse HEAD)" != "$current_main" ]; then
+            echo 'A newer main commit exists; keeping the current moving tags.'
+            exit 0
+          fi
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          docker buildx imagetools create --tag "$image:main" --tag "$image:latest" "$image@$DIGEST"
+          echo 'latest=true' >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub release
+        if: steps.release.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          MAKE_LATEST: ${{ steps.promote.outputs.latest == 'true' }}
+        run: gh release edit "$RELEASE_TAG" --draft=false --latest="$MAKE_LATEST"

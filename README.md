@@ -66,18 +66,37 @@ Production deployments should use a release tag or digest. The moving `main` and
 
 The Dockerfile pins:
 
-- Caddy `2.11.4` builder and runtime image indexes by digest.
+- Caddy's build version and its builder and runtime image indexes by digest.
 - `caddy-bunny-ip` by exact commit.
 - `caddy-dns/bunny` by exact commit.
+- The stable Dockerfile frontend by digest.
 
-Dependency updates are reviewed as repository changes and produce a new image release rather than silently replacing an existing release tag.
+Every published release keeps its exact build inputs. Dependency changes produce a new image release.
+
+## Automatic updates and releases
+
+The `Update dependencies` workflow runs daily and can also be started manually. It resolves the latest stable Caddy release, the latest default-branch commit of each Bunny module, and the current multi-platform digests of the Caddy builder, runtime, and Dockerfile frontend. It validates the updated image before committing the new pins to `main`.
+
+Dependabot checks GitHub Actions daily. Its update PRs are automatically merged after image validation succeeds, including major version updates.
+
+Each new commit on `main` is validated and automatically published as a new `<Caddy version>-<image revision>` release, with images for `linux/amd64` and `linux/arm64`, an SBOM, and provenance attestation. The `main` and `latest` image tags move after a successful build and attestation. Published releases are skipped on reruns; interrupted draft releases are retried. Unchanged dependency checks do not create new commits or releases.
+
+Automation uses the built-in `GITHUB_TOKEN`; no personal access token or separate bot setup is needed. The workflows explicitly request the write permissions they need. If branch/tag protection is added later, it must allow these automated commits, tags, and Dependabot merges. Bot commits and merges explicitly dispatch the build workflow because token-generated pushes do not trigger it.
+
+Servers using a release tag or digest stay on that version until you update their configuration. A failing validation stops that update without changing existing releases.
+
+To preview the upstream changes locally without writing any files:
+
+```bash
+python3 scripts/dependencies.py --dry-run
+```
 
 ## Local verification
 
 ```bash
 docker build -t caddy-bunny-origin:test .
 ./scripts/test-image.sh caddy-bunny-origin:test
+python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
 CI verifies the Caddy version, both compiled modules, and both Caddyfile adapters before publishing multi-platform images with SBOM and provenance metadata.
-

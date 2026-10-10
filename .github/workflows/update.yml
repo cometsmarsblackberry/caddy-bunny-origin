@@ -1,0 +1,64 @@
+name: Update dependencies
+
+on:
+  schedule:
+    - cron: "23 4 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: automatic-dependency-updates
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Resolve upstream versions and digests
+        id: dependencies
+        run: python3 scripts/dependencies.py
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build updated validation image
+        if: steps.dependencies.outputs.changed == 'true'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          load: true
+          platforms: linux/amd64
+          tags: caddy-bunny-origin:test
+          cache-from: type=gha,scope=caddy-bunny-origin-validation
+          cache-to: type=gha,mode=max,scope=caddy-bunny-origin-validation,ignore-error=true
+
+      - name: Verify updated Caddy and modules
+        if: steps.dependencies.outputs.changed == 'true'
+        run: ./scripts/test-image.sh caddy-bunny-origin:test
+
+      - name: Commit validated dependency updates
+        if: steps.dependencies.outputs.changed == 'true'
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Dockerfile
+          git commit -m 'chore: update Caddy and Bunny dependencies'
+          git push origin HEAD:main
+
+      # GITHUB_TOKEN pushes do not trigger push workflows. Dispatch explicitly,
+      # also on unchanged runs so a previously interrupted release is retried.
+      - name: Build and release main
+        run: gh workflow run build.yml --ref main
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
